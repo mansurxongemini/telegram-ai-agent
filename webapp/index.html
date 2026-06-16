@@ -12,16 +12,21 @@
     />
 
     <!--
-      gramjs (npm package "telegram") + its sub-modules are loaded from a CDN as
-      ES modules. No build step / no backend required. The browser build uses
+      gramjs (npm package "telegram") is loaded from a CDN as a single bundled
+      ES module. No build step / no backend required. The browser build uses
       WebSocket transport automatically.
+
+      IMPORTANT: everything (TelegramClient, Api, StringSession, NewMessage) is
+      imported from this ONE bundle. Importing "telegram/sessions" as a separate
+      esm.sh bundle produces a *different* StringSession class, which makes
+      gramjs throw "Only StringSession and StoreSessions are supported" — so we
+      use the re-exported `sessions` / `events` namespaces from the main entry
+      instead.
     -->
     <script type="importmap">
       {
         "imports": {
-          "telegram": "https://esm.sh/telegram@2.26.22?bundle",
-          "telegram/sessions": "https://esm.sh/telegram@2.26.22/sessions?bundle",
-          "telegram/events": "https://esm.sh/telegram@2.26.22/events?bundle"
+          "telegram": "https://esm.sh/telegram@2.26.22?bundle"
         }
       }
     </script>
