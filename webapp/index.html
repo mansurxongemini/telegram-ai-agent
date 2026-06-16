@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#17212b" />
+    <title>Telegram AI Userbot Workspace</title>
+    <link rel="stylesheet" href="./css/telegram.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='50' fill='%232ea6ff'/%3E%3Ctext x='50' y='68' font-size='52' text-anchor='middle' fill='white'%3E%E2%9C%88%3C/text%3E%3C/svg%3E"
+    />
+
+    <!--
+      gramjs (npm package "telegram") + its sub-modules are loaded from a CDN as
+      ES modules. No build step / no backend required. The browser build uses
+      WebSocket transport automatically.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "telegram": "https://esm.sh/telegram@2.26.22?bundle",
+          "telegram/sessions": "https://esm.sh/telegram@2.26.22/sessions?bundle",
+          "telegram/events": "https://esm.sh/telegram@2.26.22/events?bundle"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="modal-root"></div>
+    <div id="toast-root" class="toast-stack"></div>
+
+    <script type="module" src="./js/app.js"></script>
+    <script>
+      // Register the service worker for background notifications / polling (#13).
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker
+            .register("./sw.js")
+            .catch((err) => console.warn("SW registration failed", err));
+        });
+      }
+    </script>
+  </body>
+</html>
