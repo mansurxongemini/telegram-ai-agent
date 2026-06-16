@@ -16,7 +16,7 @@
       (server/server.js) that hosts gramjs. The browser talks to it over a
       WebSocket, so there is NO gramjs / Buffer / crypto polyfill in the
       browser at all. Start the bridge with:  cd server && npm install && npm start
-      then open http://localhost:8080
+      then open http://localhost:8123
     -->
   </head>
   <body>
@@ -26,13 +26,18 @@
 
     <script type="module" src="./js/app.js"></script>
     <script>
-      // Register the service worker for notifications + offline shell cache (#13).
+      // The Service Worker caused stale cached code to keep loading during
+      // development (old in-browser gramjs instead of the Node bridge). We now
+      // run everything through the Node bridge, so the SW is unnecessary.
+      // Actively UNREGISTER any previously installed worker and purge its
+      // caches so the latest code always loads.
       if ("serviceWorker" in navigator) {
-        window.addEventListener("load", () => {
-          navigator.serviceWorker
-            .register("./sw.js")
-            .catch((err) => console.warn("SW registration failed", err));
+        navigator.serviceWorker.getRegistrations().then((regs) => {
+          regs.forEach((r) => r.unregister());
         });
+      }
+      if (window.caches && caches.keys) {
+        caches.keys().then((keys) => keys.forEach((k) => caches.delete(k)));
       }
     </script>
   </body>
