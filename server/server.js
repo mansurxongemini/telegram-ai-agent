@@ -37,7 +37,7 @@ const { computeCheck } = require("telegram/Password");
 // ---- Telegram app credentials (from the original userbot) -----------------
 const API_ID = Number(process.env.TG_API_ID || 36319482);
 const API_HASH = process.env.TG_API_HASH || "ed3143bea8b6df50b5ae7191dfaae1cf";
-const PORT = Number(process.env.PORT || 8080);
+const PORT = Number(process.env.PORT || 8123);
 const WEBAPP_DIR = path.join(__dirname, "..", "webapp");
 
 // ---- Per-account gramjs client registry ------------------------------------
@@ -83,7 +83,7 @@ const httpServer = http.createServer((req, res) => {
         const ext = path.extname(filePath).toLowerCase();
         res.writeHead(200, {
           "Content-Type": MIME[ext] || "application/octet-stream",
-          "Cache-Control": "no-cache",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
         });
         res.end(data);
       });
