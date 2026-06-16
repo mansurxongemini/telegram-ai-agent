@@ -7,7 +7,7 @@
  * the page, and routing notification clicks back to the right chat.
  */
 
-const CACHE = "tg-ai-shell-v1";
+const CACHE = "tg-ai-shell-v3";
 const SHELL = [
   "./",
   "./index.html",
@@ -46,6 +46,32 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   // Only handle same-origin GETs; let CDN / Telegram traffic pass through.
   if (e.request.method !== "GET" || url.origin !== self.location.origin) return;
+
+  const isDoc =
+    e.request.mode === "navigate" ||
+    url.pathname.endsWith(".html") ||
+    url.pathname.endsWith("/") ||
+    url.pathname.endsWith(".js") ||
+    url.pathname.endsWith(".css");
+
+  if (isDoc) {
+    // Network-first for app code so updates are picked up immediately; fall
+    // back to cache only when offline.
+    e.respondWith(
+      fetch(e.request)
+        .then((resp) => {
+          if (resp.ok) {
+            const clone = resp.clone();
+            caches.open(CACHE).then((c) => c.put(e.request, clone));
+          }
+          return resp;
+        })
+        .catch(() => caches.match(e.request))
+    );
+    return;
+  }
+
+  // Cache-first for everything else.
   e.respondWith(
     caches.match(e.request).then((cached) => {
       const network = fetch(e.request)

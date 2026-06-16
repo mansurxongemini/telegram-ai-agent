@@ -23,50 +23,11 @@
       use the re-exported `sessions` / `events` namespaces from the main entry
       instead.
     -->
-    <!--
-      gramjs internally uses Node.js Buffer and process. Browsers don't have
-      them, so we polyfill SYNCHRONOUSLY before any module code runs.
-      We use the standalone UMD build of the "buffer" package from CDN.
-    -->
-    <script src="https://cdn.jsdelivr.net/npm/buffer@6.0.3/index.min.js"></script>
-    <script>
-      // The UMD build exposes window.buffer.Buffer
-      if (window.buffer && window.buffer.Buffer) {
-        globalThis.Buffer = window.buffer.Buffer;
-      } else if (typeof Buffer === "undefined") {
-        // Minimal fallback: only used if CDN fails (covers basic from/alloc)
-        globalThis.Buffer = {
-          from: (data, enc) => {
-            if (typeof data === "string") {
-              if (enc === "hex") {
-                const bytes = new Uint8Array(data.length / 2);
-                for (let i = 0; i < data.length; i += 2)
-                  bytes[i / 2] = parseInt(data.substr(i, 2), 16);
-                return bytes;
-              }
-              return new TextEncoder().encode(data);
-            }
-            return new Uint8Array(data);
-          },
-          alloc: (n) => new Uint8Array(n),
-          isBuffer: (b) => b instanceof Uint8Array,
-          concat: (list) => {
-            const total = list.reduce((s, b) => s + b.length, 0);
-            const out = new Uint8Array(total);
-            let offset = 0;
-            for (const b of list) { out.set(b, offset); offset += b.length; }
-            return out;
-          },
-        };
-      }
-      // gramjs also references process.env in some code paths
-      if (!globalThis.process) globalThis.process = { env: {}, version: "v18.0.0", browser: true };
-    </script>
-
     <script type="importmap">
       {
         "imports": {
-          "telegram": "https://esm.sh/telegram@2.26.22?bundle"
+          "telegram": "https://esm.sh/telegram@2.26.22?bundle",
+          "buffer": "https://esm.sh/buffer@6.0.3"
         }
       }
     </script>
@@ -75,6 +36,23 @@
     <div id="root"></div>
     <div id="modal-root"></div>
     <div id="toast-root" class="toast-stack"></div>
+
+    <!--
+      gramjs internally uses Node.js Buffer / process / global. Browsers lack
+      them, which causes "Buffer is not defined" when signing in.
+
+      ES module scripts execute in DOCUMENT ORDER and each waits for its
+      imports, so this polyfill module is guaranteed to finish (and set the
+      globals) BEFORE app.js — and therefore before the gramjs bundle is
+      evaluated.
+    -->
+    <script type="module">
+      import { Buffer } from "buffer";
+      globalThis.Buffer = Buffer;
+      globalThis.global = globalThis;
+      if (!globalThis.process)
+        globalThis.process = { env: {}, version: "v18.0.0", browser: true, nextTick: (fn, ...a) => setTimeout(() => fn(...a), 0) };
+    </script>
 
     <script type="module" src="./js/app.js"></script>
     <script>
