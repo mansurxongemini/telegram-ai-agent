@@ -9,10 +9,15 @@
  * gramjs automatically uses WebSocket transport in the browser build.
  */
 
-import { TelegramClient, Api } from "telegram";
-import { StringSession } from "telegram/sessions";
+import { TelegramClient, Api, sessions } from "telegram";
 import { TELEGRAM } from "./config.js";
 import { Bus, EV } from "./bus.js";
+
+// Pull StringSession from the SAME bundle as TelegramClient. Importing it from
+// a separate "telegram/sessions" esm.sh bundle yields a different class
+// identity, which makes gramjs reject it with
+// "Only StringSession and StoreSessions are supported currently".
+const { StringSession } = sessions;
 
 /** Map a gramjs dialog/entity to our chat data model. */
 function dialogToChat(accountId, dialog) {
@@ -209,8 +214,10 @@ export class TelegramClientManager {
   _attachHandlers() {
     if (this._handlersAttached) return;
     this._handlersAttached = true;
-    // Lazy import to avoid a hard dependency if events module path changes.
-    import("telegram/events").then(({ NewMessage }) => {
+    // Import events from the SAME "telegram" bundle (see StringSession note above)
+    // so the NewMessage builder is compatible with this client instance.
+    import("telegram").then(({ events }) => {
+      const { NewMessage } = events;
       this.client.addEventHandler(async (event) => {
         const msg = event.message;
         const mapped = await this._mapMessage(msg);
