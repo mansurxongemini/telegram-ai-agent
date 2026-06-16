@@ -1,0 +1,14 @@
+{
+  "name": "telegram-ai-userbot-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Node.js bridge that runs gramjs (MTProto) and serves the browser workspace. The browser talks to it over a WebSocket RPC, so all Node-only crypto/Buffer just works.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "telegram": "2.26.22",
+    "ws": "^8.18.0"
+  }
+}
