@@ -1,76 +1,116 @@
 /**
- * Telegram MTProto client manager (feature #1 multi-account, #3 real-time
- * messaging, #18 connection health).
+ * Telegram client manager — WebSocket RPC client of the local Node.js bridge.
  *
- * Uses gramjs (the npm package "telegram") loaded in the browser via the import
- * map in index.html. Each account gets its own TelegramClientManager instance
- * which owns a TelegramClient + StringSession.
+ * gramjs no longer runs in the browser (esm.sh's `unenv` crypto polyfill lacks
+ * crypto.createHash, which breaks MTProto auth). Instead, gramjs runs in the
+ * Node bridge (server/server.js) and this module talks to it over a WebSocket.
  *
- * gramjs automatically uses WebSocket transport in the browser build.
+ * The public TelegramClientManager interface is unchanged, so service.js / the
+ * UI keep working exactly as before:
+ *   startLogin, completeLogin, connect, disconnect, onMessage,
+ *   getDialogs, getMessages, sendMessage, setTyping, markRead,
+ *   plus .me / .status / .ping / .reconnects
  */
 
-import { TelegramClient, Api, sessions } from "telegram";
-import { TELEGRAM } from "./config.js";
 import { Bus, EV } from "./bus.js";
 
-// Pull StringSession from the SAME bundle as TelegramClient. Importing it from
-// a separate "telegram/sessions" esm.sh bundle yields a different class
-// identity, which makes gramjs reject it with
-// "Only StringSession and StoreSessions are supported currently".
-const { StringSession } = sessions;
+/* ------------------------- Shared WebSocket layer ------------------------- */
 
-/** Map a gramjs dialog/entity to our chat data model. */
-function dialogToChat(accountId, dialog) {
-  const entity = dialog.entity || {};
-  let type = "dm";
-  if (entity.className === "Channel") {
-    type = entity.megagroup ? "group" : "channel";
-  } else if (entity.className === "Chat") {
-    type = "group";
-  } else if (entity.className === "User") {
-    type = entity.self ? "saved" : "dm";
+const WS_URL = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
+
+let ws = null;
+let wsReady = null; // promise that resolves when the socket is open
+const pending = new Map(); // rpc id -> { resolve, reject, timer }
+const managersByAccount = new Map(); // accountId -> TelegramClientManager
+let rpcSeq = 0;
+
+function connectWS() {
+  if (wsReady) return wsReady;
+  wsReady = new Promise((resolve) => {
+    const open = () => {
+      ws = new WebSocket(WS_URL);
+      ws.addEventListener("open", () => {
+        console.info("[bridge] connected", WS_URL);
+        resolve();
+      });
+      ws.addEventListener("message", onWsMessage);
+      ws.addEventListener("close", () => {
+        console.warn("[bridge] disconnected — retrying in 2s");
+        // fail any in-flight RPCs
+        for (const [, p] of pending) {
+          clearTimeout(p.timer);
+          p.reject(new Error("Bridge connection lost"));
+        }
+        pending.clear();
+        wsReady = null;
+        ws = null;
+        setTimeout(connectWS, 2000);
+      });
+      ws.addEventListener("error", () => {
+        try { ws.close(); } catch (_) {}
+      });
+    };
+    open();
+  });
+  return wsReady;
+}
+
+function onWsMessage(ev) {
+  let msg;
+  try {
+    msg = JSON.parse(ev.data);
+  } catch {
+    return;
   }
 
-  const title =
-    dialog.title ||
-    [entity.firstName, entity.lastName].filter(Boolean).join(" ") ||
-    entity.username ||
-    "Unknown";
+  if (msg.type === "rpc-result") {
+    const p = pending.get(msg.id);
+    if (!p) return;
+    pending.delete(msg.id);
+    clearTimeout(p.timer);
+    if (msg.ok) p.resolve(msg.result);
+    else {
+      const err = new Error(msg.error || "RPC error");
+      if (msg.code) err.code = msg.code;
+      p.reject(err);
+    }
+    return;
+  }
 
-  const tgId = String(
-    entity.id?.value ?? entity.id ?? dialog.id?.value ?? dialog.id ?? ""
-  );
-
-  return {
-    id: `${accountId}:${tgId}`,
-    accountId,
-    telegramChatId: tgId,
-    title,
-    type,
-    username: entity.username || null,
-    lastMessage: dialog.message?.message || "",
-    lastMessageDate: dialog.message?.date ? dialog.message.date * 1000 : 0,
-    unreadCount: dialog.unreadCount || 0,
-    isPinned: !!dialog.pinned,
-    isArchived: dialog.archived || false,
-    isMuted: !!dialog.dialog?.notifySettings?.muteUntil,
-    folderId: null,
-    aiEnabled: true,
-    customPrompt: null,
-    ignoreUntil: 0,
-    online: entity.status?.className === "UserStatusOnline",
-  };
+  if (msg.type === "event") {
+    const mgr = managersByAccount.get(msg.accountId);
+    if (msg.event === "message") {
+      if (mgr) mgr._handleIncoming(msg.payload);
+    } else if (msg.event === "connection") {
+      if (mgr) mgr._applyConnection(msg.payload);
+    }
+  }
 }
+
+async function rpc(method, args, { timeout = 60000 } = {}) {
+  await connectWS();
+  const id = `rpc_${++rpcSeq}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`Bridge RPC "${method}" timed out`));
+    }, timeout);
+    pending.set(id, { resolve, reject, timer });
+    ws.send(JSON.stringify({ type: "rpc", id, method, args }));
+  });
+}
+
+/* ----------------------------- Manager class ----------------------------- */
 
 export class TelegramClientManager {
   constructor(account) {
-    this.account = account; // {id, stringSession, ...}
-    this.client = null;
+    this.account = account;
     this.me = null;
     this.status = "disconnected";
     this.reconnects = 0;
     this.ping = null;
     this._messageHandlers = new Set();
+    managersByAccount.set(account.id, this);
   }
 
   _setStatus(status, extra = {}) {
@@ -84,94 +124,64 @@ export class TelegramClientManager {
     });
   }
 
-  /** Create the gramjs client (does not connect yet). */
-  _createClient(sessionStr = "") {
-    const session = new StringSession(sessionStr || "");
-    this.client = new TelegramClient(
-      session,
-      TELEGRAM.apiId,
-      TELEGRAM.apiHash,
-      {
-        connectionRetries: TELEGRAM.connection.connectionRetries,
-        retryDelay: TELEGRAM.connection.retryDelay,
-        autoReconnect: TELEGRAM.connection.autoReconnect,
-        useWSS: TELEGRAM.connection.useWSS,
-      }
-    );
-    return this.client;
+  _applyConnection(payload) {
+    if (payload.status === "disconnected" && this.status === "connected") this.reconnects++;
+    this._setStatus(payload.status, payload);
   }
 
-  /**
-   * Step 1 of login: send the confirmation code to the phone number.
-   * Returns { phoneCodeHash } needed for signIn.
-   */
-  async startLogin(phoneNumber) {
-    this._setStatus("connecting");
-    this._createClient("");
-    await this.client.connect();
-    const result = await this.client.sendCode(
-      { apiId: TELEGRAM.apiId, apiHash: TELEGRAM.apiHash },
-      phoneNumber
-    );
-    return { phoneCodeHash: result.phoneCodeHash, phoneNumber };
-  }
-
-  /**
-   * Step 2: complete sign-in with the SMS/app code, and optional 2FA password.
-   * `needPassword` callback returns the 2FA password when Telegram requests it.
-   */
-  async completeLogin({ phoneNumber, phoneCodeHash, code, password }) {
-    try {
-      await this.client.invoke(
-        new Api.auth.SignIn({ phoneNumber, phoneCodeHash, phoneCode: code })
-      );
-    } catch (err) {
-      // SESSION_PASSWORD_NEEDED → 2FA required
-      if (String(err?.errorMessage || err).includes("SESSION_PASSWORD_NEEDED")) {
-        if (!password) {
-          const e = new Error("2FA_REQUIRED");
-          e.code = "2FA_REQUIRED";
-          throw e;
-        }
-        // gramjs helper handles SRP password math
-        await this.client.signInWithPassword(
-          { apiId: TELEGRAM.apiId, apiHash: TELEGRAM.apiHash },
-          {
-            password: async () => password,
-            onError: (e) => {
-              throw e;
-            },
-          }
-        );
-      } else {
-        throw err;
+  /** Called by the WS layer for pushed incoming messages. */
+  _handleIncoming(mapped) {
+    for (const fn of this._messageHandlers) {
+      try {
+        fn(mapped);
+      } catch (e) {
+        console.error("[bridge] message handler error", e);
       }
     }
-
-    this.me = await this.client.getMe();
-    const stringSession = this.client.session.save();
-    this._setStatus("connected");
-    this._attachHandlers();
-    return { me: this.me, stringSession };
+    Bus.emit(EV.MESSAGE_NEW, mapped);
   }
 
-  /** Reconnect using a stored StringSession (auto-reconnect on page load). */
+  onMessage(fn) {
+    this._messageHandlers.add(fn);
+    return () => this._messageHandlers.delete(fn);
+  }
+
+  /* --- Login --- */
+  async startLogin(phoneNumber) {
+    this._setStatus("connecting");
+    const res = await rpc("startLogin", { accountId: this.account.id, phone: phoneNumber });
+    return { phoneCodeHash: res.phoneCodeHash, phoneNumber };
+  }
+
+  async completeLogin({ phoneNumber, phoneCodeHash, code, password }) {
+    const res = await rpc("completeLogin", {
+      accountId: this.account.id,
+      phone: phoneNumber,
+      phoneCodeHash,
+      code,
+      password,
+    });
+    this.me = res.me;
+    this._setStatus("connected");
+    return { me: res.me, stringSession: res.stringSession };
+  }
+
+  /* --- Session reconnect --- */
   async connect() {
     if (!this.account.stringSession) return false;
     this._setStatus("connecting");
-    this._createClient(this.account.stringSession);
     try {
-      await this.client.connect();
-      const authed = await this.client.isUserAuthorized();
-      if (!authed) {
-        this._setStatus("disconnected", { reason: "unauthorized" });
-        return false;
+      const res = await rpc("connect", {
+        accountId: this.account.id,
+        stringSession: this.account.stringSession,
+      });
+      if (res && res.ok) {
+        this.me = res.me;
+        this._setStatus("connected");
+        return true;
       }
-      this.me = await this.client.getMe();
-      this._setStatus("connected");
-      this._attachHandlers();
-      this._startPing();
-      return true;
+      this._setStatus("disconnected", { reason: "unauthorized" });
+      return false;
     } catch (err) {
       this.reconnects++;
       this._setStatus("disconnected", { error: String(err) });
@@ -181,153 +191,46 @@ export class TelegramClientManager {
 
   async disconnect() {
     try {
-      await this.client?.disconnect();
-    } catch {}
+      await rpc("disconnect", { accountId: this.account.id });
+    } catch (_) {}
     this._setStatus("disconnected");
   }
 
-  /** Latency probe (feature #18 ping display). */
-  _startPing() {
-    if (this._pingTimer) clearInterval(this._pingTimer);
-    const probe = async () => {
-      if (!this.client || this.status !== "connected") return;
-      const t0 = performance.now();
-      try {
-        await this.client.invoke(new Api.Ping({ pingId: BigInt(Date.now()) }));
-        this.ping = Math.round(performance.now() - t0);
-        this._setStatus("connected");
-      } catch {
-        this.reconnects++;
-        this._setStatus("connecting");
-      }
-    };
-    this._pingTimer = setInterval(probe, 15000);
-    probe();
+  /* --- Data --- */
+  async getDialogs(limit = 120) {
+    return rpc("getDialogs", { accountId: this.account.id, limit });
   }
 
-  /** Subscribe to incoming new messages. Returns an unsubscribe fn. */
-  onMessage(fn) {
-    this._messageHandlers.add(fn);
-    return () => this._messageHandlers.delete(fn);
-  }
-
-  _attachHandlers() {
-    if (this._handlersAttached) return;
-    this._handlersAttached = true;
-    // Import events from the SAME "telegram" bundle (see StringSession note above)
-    // so the NewMessage builder is compatible with this client instance.
-    import("telegram").then(({ events }) => {
-      const { NewMessage } = events;
-      this.client.addEventHandler(async (event) => {
-        const msg = event.message;
-        const mapped = await this._mapMessage(msg);
-        for (const fn of this._messageHandlers) {
-          try {
-            await fn(mapped, event);
-          } catch (e) {
-            console.error("[telegram] message handler error", e);
-          }
-        }
-        Bus.emit(EV.MESSAGE_NEW, mapped);
-      }, new NewMessage({}));
+  async getMessages(telegramChatId, { limit = 50, offsetId = 0 } = {}) {
+    return rpc("getMessages", {
+      accountId: this.account.id,
+      chatId: telegramChatId,
+      limit,
+      offsetId,
     });
   }
 
-  async _mapMessage(msg) {
-    const accountId = this.account.id;
-    const chatIdRaw = msg.chatId ?? msg.peerId;
-    const tgChatId = String(
-      chatIdRaw?.value ??
-        chatIdRaw?.userId?.value ??
-        chatIdRaw?.channelId?.value ??
-        chatIdRaw?.chatId?.value ??
-        chatIdRaw ??
-        ""
-    );
-    let senderName = "Unknown";
-    let senderId = null;
-    try {
-      const sender = await msg.getSender?.();
-      if (sender) {
-        senderId = String(sender.id?.value ?? sender.id ?? "");
-        senderName =
-          [sender.firstName, sender.lastName].filter(Boolean).join(" ") ||
-          sender.username ||
-          "Unknown";
-      }
-    } catch {}
-
-    return {
-      id: `${accountId}:${tgChatId}:${msg.id}`,
-      accountId,
-      chatId: `${accountId}:${tgChatId}`,
-      telegramMsgId: msg.id,
-      senderId,
-      senderName,
-      text: msg.message || "",
-      timestamp: (msg.date || Math.floor(Date.now() / 1000)) * 1000,
-      isOutgoing: !!msg.out,
-      isAiGenerated: false,
-      replyToMsgId: msg.replyTo?.replyToMsgId || null,
-      mediaType: msg.media ? msg.media.className : null,
-      mediaData: null,
-      status: msg.out ? "sent" : "received",
-    };
-  }
-
-  /** Fetch dialogs (chat list). */
-  async getDialogs(limit = 100) {
-    const dialogs = await this.client.getDialogs({ limit });
-    return dialogs.map((d) => dialogToChat(this.account.id, d));
-  }
-
-  /** Fetch message history for a chat (pagination via offsetId). */
-  async getMessages(telegramChatId, { limit = 40, offsetId = 0 } = {}) {
-    const entity = await this.client.getEntity(
-      isNaN(Number(telegramChatId)) ? telegramChatId : BigInt(telegramChatId)
-    );
-    const messages = await this.client.getMessages(entity, { limit, offsetId });
-    const out = [];
-    for (const m of messages) out.push(await this._mapMessage(m));
-    return out.reverse(); // oldest first
-  }
-
-  /** Send a text message (feature #3). Supports reply. */
   async sendMessage(telegramChatId, text, { replyTo = null } = {}) {
-    const entity = await this.client.getEntity(
-      isNaN(Number(telegramChatId)) ? telegramChatId : BigInt(telegramChatId)
-    );
-    const sent = await this.client.sendMessage(entity, {
-      message: text,
-      replyTo: replyTo || undefined,
+    return rpc("sendMessage", {
+      accountId: this.account.id,
+      chatId: telegramChatId,
+      text,
+      replyTo,
     });
-    return this._mapMessage(sent);
   }
 
-  /** Show "typing..." in a chat (feature #4). */
   async setTyping(telegramChatId, typing = true) {
     try {
-      const entity = await this.client.getEntity(
-        isNaN(Number(telegramChatId)) ? telegramChatId : BigInt(telegramChatId)
-      );
-      await this.client.invoke(
-        new Api.messages.SetTyping({
-          peer: entity,
-          action: typing
-            ? new Api.SendMessageTypingAction()
-            : new Api.SendMessageCancelAction(),
-        })
-      );
-    } catch {}
+      await rpc("setTyping", { accountId: this.account.id, chatId: telegramChatId, typing }, { timeout: 8000 });
+    } catch (_) {}
   }
 
-  /** Mark a chat as read (skipped in invisible mode — bonus #23). */
   async markRead(telegramChatId) {
     try {
-      const entity = await this.client.getEntity(
-        isNaN(Number(telegramChatId)) ? telegramChatId : BigInt(telegramChatId)
-      );
-      await this.client.markAsRead(entity);
-    } catch {}
+      await rpc("markRead", { accountId: this.account.id, chatId: telegramChatId }, { timeout: 8000 });
+    } catch (_) {}
   }
 }
+
+// Kick off the bridge connection eagerly so the first login feels instant.
+connectWS();
