@@ -12,21 +12,21 @@
     />
 
     <!--
-      gramjs (npm package "telegram") is loaded from a CDN as a single bundled
-      ES module. No build step / no backend required. The browser build uses
-      WebSocket transport automatically.
+      gramjs is loaded from esm.sh as a single bundle, but with Node's "crypto"
+      kept EXTERNAL. esm.sh's default node polyfill (unenv) does NOT implement
+      crypto.createHash, which gramjs needs for MTProto auth — that caused
+      "[unenv] crypto.createHash is not implemented yet!".
 
-      IMPORTANT: everything (TelegramClient, Api, StringSession, NewMessage) is
-      imported from this ONE bundle. Importing "telegram/sessions" as a separate
-      esm.sh bundle produces a *different* StringSession class, which makes
-      gramjs throw "Only StringSession and StoreSessions are supported" — so we
-      use the re-exported `sessions` / `events` namespaces from the main entry
-      instead.
+      By marking crypto external we resolve it ourselves (via the import map
+      below) to crypto-browserify, a full browser implementation of Node's
+      crypto (createHash / createHmac / randomBytes / AES). Buffer is also
+      provided as a global by the polyfill module in <body>.
     -->
     <script type="importmap">
       {
         "imports": {
-          "telegram": "https://esm.sh/telegram@2.26.22?bundle",
+          "telegram": "https://esm.sh/telegram@2.26.22?bundle&external=crypto,buffer",
+          "crypto": "https://esm.sh/crypto-browserify@3.12.1",
           "buffer": "https://esm.sh/buffer@6.0.3"
         }
       }

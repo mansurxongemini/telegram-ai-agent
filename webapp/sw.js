@@ -7,7 +7,7 @@
  * the page, and routing notification clicks back to the right chat.
  */
 
-const CACHE = "tg-ai-shell-v3";
+const CACHE = "tg-ai-shell-v4";
 const SHELL = [
   "./",
   "./index.html",
